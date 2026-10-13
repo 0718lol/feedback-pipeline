@@ -63,7 +63,14 @@ def main() -> int:
     report = Report()
 
     if not db_path.exists():
-        report.add(FAIL, "数据库存在", f"{db_path} 不存在，请先运行 main.py collect")
+        # Expected state on a fresh clone: the database is gitignored, so there is
+        # nothing to check until collection has run at least once.
+        report.add(
+            WARN,
+            "数据库存在",
+            f"{db_path} 尚未生成 —— 全新克隆的正常状态。"
+            "请先运行 `python main.py login`（首次）与 `python main.py run` 采集数据。",
+        )
         return report.render()
 
     conn = sqlite3.connect(str(db_path))
