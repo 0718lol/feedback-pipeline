@@ -138,13 +138,25 @@ async def cmd_run_async(args):
     pipeline = FeedbackPipeline()
     platforms = [args.platform] if hasattr(args, "platform") and args.platform else None
     try:
-        await pipeline.execute_full_pipeline(
+        result = await pipeline.execute_full_pipeline(
             platforms=platforms,
             batch_size=getattr(args, "batch_size", 100),
             allow_heuristic=getattr(args, "allow_heuristic", False),
         )
     finally:
         pipeline.close()
+
+    failed_collectors = [
+        s for s in result["collector_stats"] if s.get("status") == "failed"
+    ]
+    failed_items = result["analysis_stats"].get("failed", 0)
+    if failed_collectors or failed_items:
+        print(
+            f"\n[pipeline] {len(failed_collectors)} collector target(s) failed, "
+            f"{failed_items} analysis item(s) failed. See collection_runs for details.\n"
+        )
+        return 1
+    return 0
 
 
 async def cmd_analyze_async(args):
@@ -157,6 +169,10 @@ async def cmd_analyze_async(args):
             f"\n[analyze] analyzed={stats['analyzed']} "
             f"failed={stats['failed']} skipped={stats['skipped']}\n"
         )
+        # A failed item means the run did not do what was asked. Surfacing that in
+        # the exit code is what lets cron/CI notice, instead of reading a green
+        # "analyzed=0 failed=12" line and assuming success.
+        return 1 if stats.get("failed") else 0
     finally:
         pipeline.close()
 
@@ -165,7 +181,16 @@ async def cmd_collect_async(args):
     pipeline = FeedbackPipeline()
     platforms = [args.platform] if args.platform else None
     try:
-        await pipeline.run_collectors(platforms=platforms)
+        stats = await pipeline.run_collectors(platforms=platforms)
+        failed = [s for s in stats if s.status == "failed"]
+        if failed:
+            print(
+                f"\n[collect] {len(failed)}/{len(stats)} target(s) failed: "
+                + ", ".join(f"{s.platform}:{s.target}" for s in failed)
+                + "\n"
+            )
+            return 1
+        return 0
     finally:
         pipeline.close()
 
@@ -220,22 +245,28 @@ def main():
 
     args = parser.parse_args()
 
+    # Each command returns an exit code so that automated runs (cron, CI) can tell
+    # a clean run apart from one where targets failed.
     if not args.subcommand or args.subcommand == "run":
-        asyncio.run(cmd_run_async(args))
+        code = asyncio.run(cmd_run_async(args))
     elif args.subcommand == "collect":
-        asyncio.run(cmd_collect_async(args))
+        code = asyncio.run(cmd_collect_async(args))
     elif args.subcommand == "analyze":
-        asyncio.run(cmd_analyze_async(args))
+        code = asyncio.run(cmd_analyze_async(args))
     elif args.subcommand == "login":
-        cmd_login()
+        code = cmd_login()
     elif args.subcommand == "inspect":
-        cmd_inspect(args.keyword)
+        code = cmd_inspect(args.keyword)
     elif args.subcommand == "stats":
-        cmd_stats()
+        code = cmd_stats()
     elif args.subcommand == "trace":
-        cmd_trace(args.feedback_id)
+        code = cmd_trace(args.feedback_id)
     elif args.subcommand == "test":
-        cmd_test()
+        code = cmd_test()
+    else:  # pragma: no cover - argparse rejects unknown subcommands first
+        code = 2
+
+    sys.exit(code or 0)
 
 
 if __name__ == "__main__":

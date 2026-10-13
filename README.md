@@ -129,6 +129,7 @@ python main.py run
 | **统一数据契约** | `FeedbackItem` 强制校验：ID、平台枚举、非空正文、作者、ISO 时间、可解析 URL、互动数为字典 |
 | **可追溯性** | 每条 `analysis_results` 通过外键关联 `feedbacks`，`trace` 命令可还原原始链接 |
 | **质量监控** | 空采、字段缺失率 >20%、运行失败均记录告警；遥测写入 `collection_runs` |
+| **失败可被自动化感知** | 有目标失败或分析失败时进程返回退出码 1，而不是打印一行 `failed=1` 后仍然 exit 0 |
 | **异常隔离** | 调度器逐平台捕获异常，平台 A 失败不影响平台 B |
 | **合规守线** | 检测到验证码/安全验证立即停止并抛 `PlatformBlockedError`，无任何绕过逻辑 |
 
@@ -146,7 +147,7 @@ python main.py run
 | 单平台故障不影响其他平台 | ✅ 单测覆盖 + 真实场景验证（Discord 缺 Token 时小红书照常） |
 | 抽 10 条分析结果可溯源到原帖 | ✅ 实测 10/10 链接返回 HTTP <400 |
 | 累计采集 500+ 条真实数据 | ✅ **880 条**（775 个作者，时间跨度 2024-03 ~ 2026-10） |
-| pytest 全部通过 | ✅ **62 个测试通过** |
+| pytest 全部通过 | ✅ **67 个测试通过** |
 | LLM 分析 | ✅ 880/880 条由 `deepseek-chat` 完成，0 失败 |
 | 数据契约合规率 | ✅ 空正文 0、空作者 0、时间缺失 3 条（0.3%，已被质量监控标记） |
 
@@ -346,8 +347,9 @@ feedback-pipeline/
 │       ├── logger.py             # 双写日志
 │       ├── retry.py              # 指数退避 + 抖动（同步/异步）
 │       └── timeparse.py          # 中文相对时间 → ISO 8601
-└── tests/                        # 62 个单元/集成测试
+└── tests/                        # 67 个单元/集成测试
     ├── test_checkpoint.py
+    ├── test_cli_exit_codes.py
     ├── test_db_config.py
     ├── test_fault_isolation.py
     ├── test_idempotency.py
