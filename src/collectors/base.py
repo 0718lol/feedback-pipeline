@@ -5,6 +5,11 @@ import time
 import uuid
 from typing import List, Optional
 
+from src.errors import (
+    CollectorConfigError,
+    LoginRequiredError,
+    PlatformBlockedError,
+)
 from src.models.schema import CollectorRunStats, FeedbackItem, current_iso_time
 from src.storage.checkpoint import CheckpointManager
 from src.storage.repository import FeedbackRepository
@@ -54,6 +59,17 @@ class BaseCollector(abc.ABC):
         """Return list of targets to process (e.g. channels or search keywords)."""
         pass
 
+    def commit_checkpoint(self, target: str, items: List[FeedbackItem]) -> None:
+        """
+        Advance this target's watermark/seen-set once `items` are safely persisted.
+
+        The ordering matters: BaseCollector.run() calls this *after* the database
+        write succeeds, so a crash between fetching and storing can never mark data
+        as "already collected" that was never actually stored. Subclasses that track
+        a cursor or a seen-set override this.
+        """
+        return None
+
     async def run(self) -> List[CollectorRunStats]:
         """
         Execute collection across all configured targets with fault isolation.
@@ -80,14 +96,28 @@ class BaseCollector(abc.ABC):
                 items = await self.fetch_target_items(target)
                 stats.items_collected = len(items)
 
-                # Quality Alert: 0 items collected
+                # Quality monitoring. "0 items" is only alarming when this target has
+                # never yielded anything before; a target with a populated seen-set
+                # returning 0 is simply incremental convergence, which is the system
+                # working as designed.
+                previously_seen = len(self.checkpoint_mgr.get_seen_ids(
+                    f"{self.platform_name}:{target}"
+                ))
                 if stats.items_collected == 0:
-                    self.logger.warning(
-                        f"[{self.platform_name}] QUALITY ALERT: 0 items collected for target '{target}'. "
-                        "Check search criteria, channel activity, or authentication state."
-                    )
+                    if previously_seen:
+                        self.logger.info(
+                            f"[{self.platform_name}] No new items for target '{target}' "
+                            f"(incremental sync; {previously_seen} items already stored)."
+                        )
+                    else:
+                        stats.status = "warning"
+                        self.logger.warning(
+                            f"[{self.platform_name}] QUALITY ALERT: 0 items collected for target "
+                            f"'{target}' and nothing was ever stored for it. Check search "
+                            "criteria, channel activity, selector drift or authentication state."
+                        )
 
-                # Field completeness check
+                # Field completeness check against the unified data contract.
                 incomplete_count = 0
                 for item in items:
                     validation_errors = item.validate()
@@ -99,24 +129,42 @@ class BaseCollector(abc.ABC):
 
                 if items and (incomplete_count / len(items) > 0.2):
                     self.logger.error(
-                        f"[{self.platform_name}] QUALITY ALERT: High contract error rate ({incomplete_count}/{len(items)}). "
-                        "Page structure or API format may have changed!"
+                        f"[{self.platform_name}] QUALITY ALERT: High contract error rate "
+                        f"({incomplete_count}/{len(items)}). Page structure or API format "
+                        "may have changed!"
                     )
 
-                # Idempotent batch insertion
+                # Idempotent batch insertion (primary key + INSERT OR IGNORE).
                 new_count, dup_count = self.repo.save_feedbacks_batch(items)
                 stats.items_new = new_count
                 stats.items_failed = incomplete_count
-                stats.status = "success" if incomplete_count == 0 else "warning"
+                if incomplete_count == 0 and stats.status == "running":
+                    stats.status = "success"
+                elif incomplete_count:
+                    stats.status = "warning"
+
+                # Only now that the rows are durable do we advance the watermark.
+                self.commit_checkpoint(target, items)
 
                 self.logger.info(
                     f"[{self.platform_name}] Completed '{target}': {stats.items_collected} collected, "
                     f"{stats.items_new} new, {dup_count} duplicates ignored."
                 )
 
+            except (CollectorConfigError, LoginRequiredError, PlatformBlockedError) as e:
+                # Expected, actionable operational conditions: log the message without a
+                # misleading traceback, and record the real reason in the run telemetry.
+                stats.status = "failed"
+                stats.error_message = str(e)
+                self.logger.error(
+                    f"[{self.platform_name}] Cannot collect target '{target}': {e}"
+                )
+
             except Exception as e:
+                stats.status = "failed"
+                stats.error_message = f"{type(e).__name__}: {e}"
                 self.logger.exception(
-                    f"[{self.platform_name}] Failed collection for target '{target}': {e}"
+                    f"[{self.platform_name}] Unexpected failure for target '{target}': {e}"
                 )
                 stats.status = "failed"
                 stats.error_message = str(e)

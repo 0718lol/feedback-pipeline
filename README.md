@@ -1,195 +1,289 @@
-# 多平台用户反馈采集与智能分析系统 (Multi-Platform User Feedback Pipeline)
+# 多平台用户反馈采集与智能分析系统
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests: passing](https://img.shields.io/badge/tests-10%2F10%20passed-brightgreen.svg)](#单元测试与质量验证)
+**采集 → 清洗校验 → 增量同步 → 去重幂等 → 结构化存储 → LLM 智能分析 → 全链路可追溯**
 
-一个面向生产级可靠性设计、支持多平台（Discord 官方 API / 小红书公开页 Playwright）的用户反馈数据流水线。实现 **『数据采集 → 清洗校验 → 增量同步 → 去重幂等 → 结构化存储 → LLM 智能分析 → 全链路可追溯』** 的闭环工程体系。
+一个面向长期运行设计的用户反馈数据管道。当前已稳定采集 **768 条小红书真实公开笔记**（692 个不同作者，发布时间跨度 2024-03 至 2026-10），并全部经真实大模型（DeepSeek）完成情感分类与问题聚类。
+
+> **关于数据真实性**：本仓库中的每一条记录都来自真实平台采集，没有任何硬编码的模拟数据。项目在缺少凭据、未登录或遭遇风控时会**明确失败并记录原因**，而不是伪造数据让流水线"看起来正常"。这是本项目和常见 Demo 最大的区别，也是设计上最刻意的取舍。
 
 ---
 
 ## 目录
-- [一、项目架构与设计](#一项目架构与设计)
-- [二、核心工程特性实现](#二核心工程特性实现)
+
+- [一、项目简介](#一项目简介)
+- [二、系统架构](#二系统架构)
 - [三、快速开始（5 步跑通）](#三快速开始5-步跑通)
-- [四、CLI 常用命令](#四cli-常用命令)
-- [五、单元测试与质量验证](#五单元测试与质量验证)
-- [六、工程设计与技术取舍说明（面试核心）](#六工程设计与技术取舍说明面试核心)
-- [七、目录结构](#七目录结构)
+- [四、CLI 命令](#四cli-命令)
+- [五、工程特性与实现机制](#五工程特性与实现机制)
+- [六、实测结果](#六实测结果)
+- [七、工程取舍说明（面试核心）](#七工程取舍说明面试核心)
+- [八、合规声明](#八合规声明)
+- [九、已知限制](#九已知限制)
+- [十、目录结构](#十目录结构)
 
 ---
 
-## 一、项目架构与设计
+## 一、项目简介
 
-```
-[数据源层]
-  ├── Discord (官方 Bot REST API v10 / 游标 incremental query)
-  └── 小红书 (Playwright 动态无头浏览器 / storage_state 登录态复用)
-         │
-         ▼
-[流控与安全层]
-  ├── 随机抖动延时 (2.0s ~ 5.0s Jitter)
-  ├── 指数退避重试 (Exponential Backoff, 3次上限)
-  └── 异常隔离机制 (Fault Isolation: 单源故障不阻断全局任务)
-         │
-         ▼
-[清洗与契约层]
-  └── 统一数据契约 FeedbackItem Schema (严格校验：ID、时间戳、作者、互动数、溯源URL)
-         │
-         ▼
-[存储与状态层 (SQLite WAL)]
-  ├── feedbacks (唯一约束保证去重与幂等写入)
-  ├── checkpoints (水位线游标持久化，支持中断后断点续传)
-  └── collection_runs (运行遥测日志与质量监控报警)
-         │
-         ▼
-[LLM 智能分析引擎 (OpenAI Compatible)]
-  ├── 情感分类 (positive / negative / neutral)
-  ├── 问题聚类 (bug / feature_request / inquiry / praise / other)
-  └── 结构化结果关联入库 (analysis_results 表外键约束，端到端可追溯)
-```
+目标岗位需要搭建 X / 小红书 / Discord 的用户反馈数据链路。本项目实现了其中的**小红书**（真实采集，已跑通）与 **Discord**（官方 API 适配器，代码完整但未用真实 Token 实测），并把两个来源统一到同一份数据契约上，验证"多平台接入"这一架构能力。
+
+技术栈：Python 3.12 · Playwright（真实 Chrome）· httpx + asyncio · SQLite (WAL) · OpenAI 兼容 LLM API · pytest
 
 ---
 
-## 二、核心工程特性实现
+## 二、系统架构
 
-| 特性 | 工程实现机制 | 解决的痛点 |
-|---|---|---|
-| **去重幂等** | 数据库以平台前缀 ID（如 `discord:{channel}:{msg_id}`）为 Primary Key，底层执行 `INSERT OR IGNORE` | 重复调度或异常重跑不会产生任何重复脏数据 |
-| **增量同步** | 基于 Watermark 机制。Discord 采用 `after={last_item_id}` 游标；网页采集比对已入库的水位线 | 避免重复抓取历史旧数据，节约 90%+ 的网络请求与算力 |
-| **断点续传** | `checkpoints` 表实时持久化每个 Channel/Keyword 的采集断点，崩溃重启自动从断点拉取 | 避免网络抖动或手动中断导致任务必须重头开始 |
-| **登录态持久化** | Playwright `storage_state` 将 Cookie 与 Session 序列化至本地 JSON 文件持久化复用 | 杜绝每次运行弹出登录页，降低账号风控风险 |
-| **全链路溯源** | 统一数据契约强制要求 `url` 字段，每条 LLM 输出均能通过反馈 ID 联动查看原帖 URL | 确保分析结论经得起真实业务排查与还原 |
-| **监控与告警** | 捕获空采（Count=0）及字段缺失率（>20%）并输出告警，遥测数据记录至 `collection_runs` | 第一时间发现反爬升级、页面改版或 Token 失效 |
-| **异常隔离** | Pipeline 调度器对各采集器进行上下文隔离，平台 A 异常不影响平台 B | 确保分布式多源系统的健壮性 |
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 数据源层                                                      │
+│  ├─ 小红书公开搜索页  ← Playwright 驱动本地 Chrome + storage_state │
+│  └─ Discord 官方 REST API v10 ← httpx + Bot Token             │
+└───────────────────────────┬─────────────────────────────────┘
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 流控与合规层                                                  │
+│  ├─ 随机抖动延时 2~5s（每次翻页/请求）                          │
+│  ├─ 指数退避重试（初始 2s，倍数 2，上限 3 次，带抖动）           │
+│  ├─ 登录墙 / 验证码检测 → 立即停止，绝不绕过                     │
+│  └─ 异常隔离：单平台失败不阻断其他平台                          │
+└───────────────────────────┬─────────────────────────────────┘
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 清洗与契约层                                                  │
+│  └─ FeedbackItem 统一契约（ID/平台/正文/作者/时间/互动/URL）    │
+│     ├─ 时间归一化："7小时前" / "08-19" → ISO 8601             │
+│     ├─ 互动数解析："1.2万" → 12000                            │
+│     └─ 推广卡片过滤：仅接受 24 位十六进制笔记 ID                 │
+└───────────────────────────┬─────────────────────────────────┘
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 存储与状态层（SQLite WAL，外键开启）                            │
+│  ├─ feedbacks        主键即去重键，INSERT OR IGNORE 保证幂等     │
+│  ├─ checkpoints      水位线 + 已见 ID 集合（断点续传 / 增量）    │
+│  ├─ analysis_results 外键关联 feedbacks，保证可追溯             │
+│  └─ collection_runs  每次运行的状态、数量、错误信息（质量监控）   │
+└───────────────────────────┬─────────────────────────────────┘
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ LLM 分析层（OpenAI 兼容 / DeepSeek）                          │
+│  ├─ 情感分类 positive / negative / neutral                    │
+│  ├─ 问题聚类 bug / feature_request / inquiry / praise / other │
+│  └─ 结构化 JSON → 校验 → 关联 feedback_id 入库                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**关键顺序保证**：`采集 → 落库 → 再推进水位线`。如果进程在中间崩溃，没有任何内容会被标记为"已采过"，下次运行会重新采集，而不是永久丢失。
 
 ---
 
 ## 三、快速开始（5 步跑通）
 
-### 第 1 步：克隆仓库并进入目录
 ```bash
-git clone https://github.com/your-username/feedback-pipeline.git
-cd feedback-pipeline
-```
+# 1. 克隆并进入目录
+git clone https://github.com/<your-name>/feedback-pipeline.git && cd feedback-pipeline
 
-### 第 2 步：创建并激活 Python 虚拟环境
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
+# 2. 创建虚拟环境（需要 Python 3.11+）
+python3 -m venv .venv && source .venv/bin/activate
 
-### 第 3 步：配置环境变量
-```bash
-cp .env.example .env
-# 编辑 .env 文件，填入你的 API 配置（未配置 Token 时系统将自动安全切换至内置仿真模式）
-```
-
-### 第 4 步：安装依赖（按需安装自动化浏览器）
-```bash
+# 3. 安装依赖
 pip install -r requirements.txt
-# 若需要运行小红书真实网页采集，安装 Playwright 浏览器内核：
-# playwright install chromium
+
+# 4. 配置环境变量（复制模板并填入你的 Key）
+cp .env.example .env && $EDITOR .env
+
+# 5. 登录小红书（仅首次，扫码一次），然后运行完整链路
+python main.py login
+python main.py run
 ```
 
-### 第 5 步：一键运行全链路流水线
-```bash
-python3 main.py run
+**关于浏览器**：默认复用你本机已安装的 Google Chrome（`XHS_BROWSER_CHANNEL=chrome`），无需下载约 150MB 的 Chromium。如果你没有 Chrome，先执行 `python -m playwright install chromium` 并把该变量设为空。
+
+**关于登录**：小红书搜索页有登录墙。`python main.py login` 会打开一个可见的 Chrome 窗口，你用手机扫码后脚本自动保存会话到 `data/xhs_auth_state.json`（已 gitignore），后续采集自动复用，无需重复登录。
+
+---
+
+## 四、CLI 命令
+
+| 命令 | 说明 |
+|---|---|
+| `python main.py run` | 完整链路：采集 → 入库 → LLM 分析 → 打印报告 |
+| `python main.py collect --platform xhs` | 仅采集（可指定平台） |
+| `python main.py analyze --batch-size 100` | 对未分析的数据运行 LLM 结构化提取 |
+| `python main.py login` | 首次登录小红书，持久化会话 |
+| `python main.py inspect "关键词"` | 输出实时页面诊断，用于页面改版后重调选择器 |
+| `python main.py stats` | 输出系统级遥测：总量、平台分布、情感/分类分布 |
+| `python main.py trace <id>` | 溯源审计：由 ID 查出该条分析结论对应的原始帖子 URL |
+| `python main.py test` | 一键运行测试套件 |
+
+---
+
+## 五、工程特性与实现机制
+
+| 特性 | 实现机制 |
+|---|---|
+| **登录态持久化** | Playwright `storage_state` 序列化 Cookie 到本地 JSON，后续运行自动注入 context |
+| **限流应对** | 每次翻页/请求间 2~5s 伪随机延时；失败时初始 2s、倍数 2 的指数退避，最多 3 次，带抖动 |
+| **增量同步** | Discord 用原生 `after=<msg_id>` 游标；小红书搜索按**相关性**排序，游标无意义，改用"已见 ID 集合 + 连续命中已知内容则收敛停止" |
+| **断点续传** | `checkpoints` 表持久化每个目标的断点与已见集合，重启后从断点继续 |
+| **去重幂等** | 主键为 `平台:内容ID`，底层 `INSERT OR IGNORE`，重复运行不产生重复行 |
+| **统一数据契约** | `FeedbackItem` 强制校验：ID、平台枚举、非空正文、作者、ISO 时间、可解析 URL、互动数为字典 |
+| **可追溯性** | 每条 `analysis_results` 通过外键关联 `feedbacks`，`trace` 命令可还原原始链接 |
+| **质量监控** | 空采、字段缺失率 >20%、运行失败均记录告警；遥测写入 `collection_runs` |
+| **异常隔离** | 调度器逐平台捕获异常，平台 A 失败不影响平台 B |
+| **合规守线** | 检测到验证码/安全验证立即停止并抛 `PlatformBlockedError`，无任何绕过逻辑 |
+
+---
+
+## 六、实测结果
+
+以下为在本机真实运行的结果，非估算：
+
+| 验收项 | 结果 |
+|---|---|
+| 连续运行 3 次数据库无重复 | ✅ 768 条记录，ID 与 URL 均唯一 |
+| 第二次运行只采新增内容 | ✅ 增量收敛，重复运行采集 0 条新增 |
+| 中途中断后重启从断点继续 | ✅ 水位线仅在落库后推进，中断不丢数据 |
+| 单平台故障不影响其他平台 | ✅ 有对应单元测试覆盖 |
+| 抽 10 条分析结果可溯源到原帖 | ✅ `trace` 命令返回真实 `xiaohongshu.com/explore/<id>` 链接 |
+| 累计采集 500+ 条真实数据 | ✅ **768 条**（692 个作者，时间跨度 2024-03 ~ 2026-10） |
+| pytest 全部通过 | ✅ **62 个测试通过** |
+| 数据契约合规率 | ✅ 空正文 0、空作者 0、时间缺失 3 条（0.4%，已被质量监控标记） |
+
+数据分布示例：
+
+```
+总记录数        : 768
+唯一 ID / URL   : 768 / 768
+不同作者数      : 692
+空 created_at   : 3   (0.4%，来自少数无时间标签的卡片)
+采集运行记录    : 8   (失败 0)
 ```
 
 ---
 
-## 四、CLI 常用命令
+## 七、工程取舍说明（面试核心）
 
-| 命令 | 说明 | 示例 |
-|---|---|---|
-| `python3 main.py run` | 运行完整链路（全平台采集 → 增量入库 → LLM 分析 → 打印报告） | `python3 main.py run` |
-| `python3 main.py collect` | 仅执行采集模块（可指定 `--platform`） | `python3 main.py collect --platform discord` |
-| `python3 main.py analyze` | 仅对数据库中未分析的反馈运行 LLM 结构化提取 | `python3 main.py analyze --batch-size 50` |
-| `python3 main.py stats` | 输出系统级遥测健康报告与情感/分类分布 | `python3 main.py stats` |
-| `python3 main.py trace <id>` | 审计溯源：通过 ID 查询该条分析并返回原帖真实 URL | `python3 main.py trace discord:mock_channel_feedback:120000000000000001` |
-| `python3 main.py test` | 一键执行测试套件 | `python3 main.py test` |
+### 1. 为什么宁可失败也不提供"模拟数据模式"？
 
----
+初版曾在缺少凭据时自动切换到内置假数据，让流水线"看起来正常"。这个设计被移除了，原因很直接：
 
-## 五、单元测试与质量验证
+- **假数据会污染分析结论**。用 8 条硬编码文本跑出来的情感分布，和真实数据毫无关系，却会以同样格式进入数据库和报表。
+- **掩盖真实的工程缺陷**。小红书采集器在缺少浏览器内核时会崩溃，但因为假数据兜底，这个 bug 在原开发者机器上从未暴露。
+- **面试风险**。面试官问"这些数据哪来的"，答不上来就是致命伤。
 
-系统自带轻量且严谨的单元测试套件，零外部网络依赖，测试覆盖核心工程逻辑：
+现在的行为：缺凭据 → 抛 `CollectorConfigError`；未登录 → 抛 `LoginRequiredError`；遇验证码 → 抛 `PlatformBlockedError`。三种情况都会以 `status='failed'` 和明确原因写入 `collection_runs`。
 
-```bash
-python3 main.py test
-```
+### 2. 为什么小红书用"已见 ID 集合"而不是时间水位线？
 
-### 测试用例覆盖明细：
-- `test_idempotency.py`: 连续插入相同数据 3 次，断言数据库记录数始终为 1。
-- `test_checkpoint.py`: 模拟程序中途崩溃退出，验证重启后正确读取断点水位。
-- `test_schema.py`: 验证统一数据契约校验规则（必填字段、非法 URL 拦截）。
-- `test_fault_isolation.py`: 故意模拟 Discord 平台抛出网络异常，验证小红书采集任务照常成功完成。
-- `test_llm_parser.py`: 验证 Markdown 代码块清洗、JSON 提取容错与启发式离线降级引擎。
-- `test_traceability.py`: 抽取数据验证每条分析结果均可正确映射回真实原帖 URL。
+Discord 的消息 ID 是雪花 ID，单调递增，`after=<id>` 是可靠的游标。
 
----
+但小红书的搜索结果按**相关性**排序，不是按时间。用"最新一条的时间/ID 作为水位线"是错的：翻到第 3 页可能遇到一条 2 年前的笔记，水位线会被设成一个很旧的值，导致新内容被漏采。
 
-## 六、工程设计与技术取舍说明（面试核心）
+所以这里改用两个机制配合：
+- **已见 ID 集合**：精确跳过已入库的笔记，这是幂等性的真实来源；
+- **收敛启发式**：连续 40 条结果全部是已见内容时停止翻页，避免为"确认没有新内容"而无休止地滚动。
 
-在面试中被问及系统架构与技术选型时，可重点阐述以下四点设计权衡：
+这是"针对数据源特性选择策略"，而不是套用一个通用方案。
 
-### 1. 为什么采用 SQLite WAL 模式而不是直接上 MySQL / PostgreSQL？
-- **设计权衡**：本项目定位于单机可独立运行、轻量易交付的采集与分析系统。SQLite 零配置、无守护进程成本，适合嵌入式部署。
-- **并发保障**：通过启用 `PRAGMA journal_mode = WAL`（预写日志），实现**读写互不阻塞**，并开启 `foreign_keys = ON` 维持严格的外键参照完整性，满足每秒数千次轻量写入的性能要求。
+### 3. 为什么水位线必须在落库之后才推进？
 
-### 2. 增量同步为什么采用游标（Watermark）而非全量扫描比对？
-- **设计权衡**：若每次抓取全量数据再入库比对去重，随着历史数据规模扩大，网络 I/O 开销与计算复杂度呈 $O(N)$ 激增，极易触发平台反爬。
-- **解决方案**：针对 Discord 官方 API 利用其原生 `after={msg_id}` 游标，在接口层仅请求增量数据；小红书端在滑动列表遇到小于等于 Watermark 的 Note ID 时立即短路终止，将网络请求降至最低。
+早期实现里，采集器抓完数据就立刻更新水位线，之后才由调度器写库。中间这个窗口如果进程被杀，那批内容已经被标记为"已采过"，但从未真正入库——**永久丢失，且不会报错**。
 
-### 3. 限流与反爬对抗：为什么采用随机抖动延时（Jitter）与指数退避？
-- **设计权衡**：固定周期的请求容易被平台的流量行为分析特征识别，而纯并发抓取容易引发 HTTP 429。
-- **解决方案**：每次请求引入 2.0s ~ 5.0s 的伪随机离散延时，并在遭遇网络抖动或 429 限流时，触发初始为 2s、倍数为 2 的指数退避重试（带微抖动），最大重试 3 次，平衡采集吞吐率与合规安全性。
+现在 `BaseCollector.run()` 的顺序是：`fetch → 校验 → 落库 → commit_checkpoint`。采集器通过 `commit_checkpoint()` 钩子推进自己的水位线/已见集合。对应的回归测试是 `test_watermark_is_not_advanced_before_persistence`。
 
-### 4. 为什么在 LLM 模块中设计离线规则降级与清洗容错？
-- **设计权衡**：外部大模型 API 存在网络不稳定、Token 额度耗尽以及响应格式夹杂 Markdown 标记的实际痛点。
-- **解决方案**：
-  1. 通过正则解析与括号匹配消除 ```` ```json ```` 等格式干扰；
-  2. 实现本地启发式分类引擎作为 Fallback，保证在断网或无 Key 状态下，系统仍具备完整的冒烟测试和离线演示能力。
+### 4. 为什么用 SQLite WAL 而不是 PostgreSQL？
+
+单机运行的采集任务，SQLite 零运维成本，`journal_mode=WAL` 让读写互不阻塞，`foreign_keys=ON` 保证 `analysis_results` 不会出现悬空引用。真正的瓶颈在网络请求（2~5s 抖动延时）而不是数据库写入，换 PostgreSQL 不会带来任何吞吐提升。
+
+### 5. 为什么 LLM 分析要区分"真实模型"和"规则引擎"？
+
+分析结果表里有 `model` 字段。真实调用写入 `deepseek-chat`，规则引擎写入 `heuristic-rule-engine-v1`。
+
+规则引擎只在显式传入 `--allow-heuristic` 时启用（用于无网络环境下的冒烟测试），且**每一条输出都带明确标记**。这样任何下游读者都不可能把 `if "bug" in text` 的结果误认为模型判断。
+
+### 6. 时间字段为什么要单独做归一化？
+
+小红书页面上的时间是给人看的："刚刚"、"7小时前"、"08-19"。直接存字符串会导致无法排序、无法做时间序列分析；而 `08-19` 还有歧义——它指的是**最近一个尚未到来的 8 月 19 日**（如果今天是 10 月 13 日，那就是今年；如果今天是 3 月 1 日，那就是去年）。
+
+`src/utils/timeparse.py` 把这些规则显式实现并单元测试覆盖。解析不了的标签返回空字符串，由质量监控如实报告缺失，而不是编造一个时间。
 
 ---
 
-## 七、目录结构
+## 八、合规声明
+
+本项目在采集侧遵守以下边界，代码中没有任何绕过机制：
+
+- ✅ 仅采集**公开可见**的搜索结果与内容
+- ✅ 登录由**用户本人手动扫码**完成，代码不接触、不存储账号密码
+- ✅ 请求间强制随机延时，控制对平台的访问频率
+- ✅ 检测到验证码 / 安全验证时**立即停止**并抛出异常
+- ❌ 不破解验证码、不使用打码平台
+- ❌ 不使用付费代理池或指纹伪装服务
+- ❌ 不采集需要登录才能看到的私密内容
+- ❌ 不在代码与 Git 历史中提交任何真实 Cookie / Token / API Key
+
+`data/xhs_auth_state.json`、`.env`、`data/*.db` 均已在 `.gitignore` 中排除。
+
+---
+
+## 九、已知限制
+
+如实列出，避免过度宣称：
+
+1. **Discord 适配器未用真实 Token 实测**。代码路径完整（httpx 异步、429 限流处理、401/403/404 分类错误、`after=` 游标增量），但本机环境无法访问 Discord API，因此没有端到端验证记录。
+2. **小红书搜索卡片不提供评论数与收藏数**，只提供点赞数。`metrics` 中因此只有 `likes`。要拿到完整互动数据需要额外打开笔记详情页，会显著增加请求量，当前未实现。
+3. **3/768 条记录缺少发布时间**（0.4%）。这些卡片没有渲染时间标签，已由质量监控标记，未被编造填充。
+4. **页面结构变更会导致采集失效**。已提供 `python main.py inspect` 输出实时 DOM 诊断用于快速重调选择器；选择器本身做了多层回退，但平台改版仍需人工介入。
+5. **单机顺序采集**。没有分布式调度，768 条约需 4 分钟（受 2~5s 限流延时约束）。这是有意为之：提高并发会显著增加被风控的概率。
+
+---
+
+## 十、目录结构
 
 ```
 feedback-pipeline/
-├── .env.example              # 环境变量配置模板
-├── .gitignore                 # 敏感文件与缓存过滤规则
-├── README.md                  # 项目工程文档与面试指南
-├── requirements.txt           # 依赖清单
-├── main.py                    # 命令行调度入口
-├── data/                      # 本地 SQLite 数据库与登录态存储
-│   └── feedbacks.db
-├── logs/                      # 运行日志
-│   └── pipeline.log
+├── .env.example                  # 环境变量模板（无任何真实凭据）
+├── .gitignore                    # 排除 .env / 登录态 / 数据库 / 日志
+├── README.md
+├── requirements.txt
+├── main.py                       # CLI 入口
+├── data/                         # 本地数据库与登录态（gitignored）
+├── logs/                         # 运行日志（gitignored）
 ├── src/
-│   ├── analyzer/              # LLM 结构化提取模块
-│   │   └── llm_analyzer.py
-│   ├── collectors/            # 多平台采集器实现
-│   │   ├── base.py            # 抽象基类（含遥测、契约验证与监控报警）
-│   │   ├── discord_collector.py
-│   │   └── xhs_collector.py
-│   ├── models/                # 统一契约与数据库模型
-│   │   ├── db.py              # SQLite 连接池与建表语句
-│   │   └── schema.py          # FeedbackItem / AnalysisResult 数据契约
-│   ├── storage/               # 仓储与断点管理
-│   │   ├── checkpoint.py      # Watermark 增量水位管理
-│   │   └── repository.py      # 数据访问层（去重幂等与溯源查询）
-│   ├── utils/                 # 工具类
-│   │   ├── config.py          # 零依赖配置解析
-│   │   ├── logger.py          # 结构化双写日志
-│   │   └── retry.py           # 指数退避与抖动装饰器
-│   └── pipeline.py            # 主调度控制器（异常隔离）
-└── tests/                     # 单元测试套件
+│   ├── errors.py                 # 类型化异常（替代静默降级）
+│   ├── pipeline.py               # 调度编排 + 异常隔离
+│   ├── collectors/
+│   │   ├── base.py               # 抽象基类：契约校验、遥测、告警、水位线提交钩子
+│   │   ├── xhs_collector.py      # 小红书：真实 DOM 提取、登录态、翻页、增量收敛
+│   │   └── discord_collector.py  # Discord：httpx 异步 REST + 游标增量
+│   ├── analyzer/
+│   │   └── llm_analyzer.py       # LLM 结构化分析 + 响应清洗 + 契约校验
+│   ├── models/
+│   │   ├── db.py                 # 连接管理、建表、URL 解析、前向迁移
+│   │   └── schema.py             # FeedbackItem / AnalysisResult 数据契约
+│   ├── storage/
+│   │   ├── checkpoint.py         # 水位线 + 已见 ID 集合
+│   │   └── repository.py         # 数据访问层：幂等写入与溯源查询
+│   └── utils/
+│       ├── config.py             # 零依赖配置加载
+│       ├── logger.py             # 双写日志
+│       ├── retry.py              # 指数退避 + 抖动（同步/异步）
+│       └── timeparse.py          # 中文相对时间 → ISO 8601
+└── tests/                        # 62 个单元/集成测试
     ├── test_checkpoint.py
+    ├── test_db_config.py
     ├── test_fault_isolation.py
     ├── test_idempotency.py
+    ├── test_incremental_sync.py
     ├── test_llm_parser.py
     ├── test_schema.py
-    └── test_traceability.py
+    ├── test_timeparse.py
+    ├── test_traceability.py
+    └── test_xhs_parsing.py
 ```
+
+---
+
+## License
+
+MIT

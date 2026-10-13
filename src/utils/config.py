@@ -44,6 +44,15 @@ class AppConfig:
     xhs_headless: bool = True
     xhs_storage_state_path: str = "data/xhs_auth_state.json"
     xhs_max_notes_per_run: int = 50
+    # Which browser Playwright should drive. "chrome" reuses the locally installed
+    # Google Chrome, so no `playwright install` download is required.
+    xhs_browser_channel: str = "chrome"
+    # Seconds to wait for a human to finish scanning the login QR code.
+    xhs_login_timeout_seconds: int = 300
+    # Max scrolls per keyword while paging through search results.
+    xhs_max_scrolls: int = 12
+    # Stop paging after this many consecutive already-seen notes (incremental convergence).
+    xhs_stop_after_seen: int = 20
 
     # Rate Limit & Delays
     min_delay_seconds: float = 2.0
@@ -78,6 +87,10 @@ class AppConfig:
             xhs_headless=os.environ.get("XHS_HEADLESS", "true").lower() in ("true", "1", "yes"),
             xhs_storage_state_path=os.environ.get("XHS_STORAGE_STATE_PATH", "data/xhs_auth_state.json"),
             xhs_max_notes_per_run=int(os.environ.get("XHS_MAX_NOTES_PER_RUN", "50")),
+            xhs_browser_channel=os.environ.get("XHS_BROWSER_CHANNEL", "chrome"),
+            xhs_login_timeout_seconds=int(os.environ.get("XHS_LOGIN_TIMEOUT_SECONDS", "300")),
+            xhs_max_scrolls=int(os.environ.get("XHS_MAX_SCROLLS", "12")),
+            xhs_stop_after_seen=int(os.environ.get("XHS_STOP_AFTER_SEEN", "20")),
             min_delay_seconds=float(os.environ.get("COLLECTOR_MIN_DELAY_SECONDS", "2.0")),
             max_delay_seconds=float(os.environ.get("COLLECTOR_MAX_DELAY_SECONDS", "5.0")),
             max_retries=int(os.environ.get("COLLECTOR_MAX_RETRIES", "3")),

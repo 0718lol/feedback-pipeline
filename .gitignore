@@ -32,7 +32,15 @@ logs/
 # Playwright & Browser Sessions
 data/xhs_auth_state.json
 .playwright/
+# Dedicated browser profiles created for interactive login (contain live cookies)
+data/browser_profile/
+.browser_profile/
 test-results/
+
+# Any exported snapshot of collected data
+exports/
+*.csv
+*.xlsx
 
 # Testing & Coverage
 .pytest_cache/

@@ -66,5 +66,73 @@ class TestCheckpointAndIncremental(unittest.TestCase):
         self.assertEqual(final_count, 19)
 
 
+class TestSeenIdSet(unittest.TestCase):
+    """
+    The seen-set is what makes incremental sync sound for relevance-ordered feeds
+    such as Xiaohongshu search results, where the newest id is not a usable cursor.
+    """
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        with self.conn:
+            self.conn.execute(
+                """
+                CREATE TABLE checkpoints (
+                    checkpoint_key TEXT PRIMARY KEY,
+                    last_item_id TEXT,
+                    last_timestamp TEXT,
+                    items_count INTEGER DEFAULT 0,
+                    seen_ids TEXT DEFAULT '[]',
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+        self.checkpoint_mgr = CheckpointManager(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_empty_by_default(self):
+        self.assertEqual(self.checkpoint_mgr.get_seen_ids("xhs:AI工具"), set())
+
+    def test_ids_accumulate_across_calls(self):
+        self.checkpoint_mgr.add_seen_ids("xhs:AI工具", ["a", "b"])
+        self.checkpoint_mgr.add_seen_ids("xhs:AI工具", ["b", "c"])
+        self.assertEqual(self.checkpoint_mgr.get_seen_ids("xhs:AI工具"), {"a", "b", "c"})
+
+    def test_adding_is_idempotent(self):
+        self.checkpoint_mgr.add_seen_ids("xhs:AI工具", ["a"])
+        first = self.checkpoint_mgr.add_seen_ids("xhs:AI工具", ["a"])
+        second = self.checkpoint_mgr.add_seen_ids("xhs:AI工具", ["a"])
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 1)
+
+    def test_seen_ids_are_scoped_per_target(self):
+        self.checkpoint_mgr.add_seen_ids("xhs:AI工具", ["a"])
+        self.checkpoint_mgr.add_seen_ids("xhs:数据科学", ["b"])
+        self.assertEqual(self.checkpoint_mgr.get_seen_ids("xhs:AI工具"), {"a"})
+        self.assertEqual(self.checkpoint_mgr.get_seen_ids("xhs:数据科学"), {"b"})
+
+    def test_empty_input_is_a_noop(self):
+        self.checkpoint_mgr.add_seen_ids("xhs:AI工具", [])
+        self.assertEqual(self.checkpoint_mgr.get_seen_ids("xhs:AI工具"), set())
+
+    def test_corrupt_payload_degrades_to_empty_set(self):
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO checkpoints (checkpoint_key, seen_ids, updated_at) VALUES (?,?,?)",
+                ("xhs:broken", "not-json", "2026-10-13T00:00:00Z"),
+            )
+        self.assertEqual(self.checkpoint_mgr.get_seen_ids("xhs:broken"), set())
+
+    def test_reset_clears_both_watermark_and_seen_set(self):
+        self.checkpoint_mgr.update_checkpoint("xhs:AI工具", last_item_id="a")
+        self.checkpoint_mgr.add_seen_ids("xhs:AI工具", ["a"])
+        self.checkpoint_mgr.reset_checkpoint("xhs:AI工具")
+        self.assertIsNone(self.checkpoint_mgr.get_checkpoint("xhs:AI工具")[0])
+        self.assertEqual(self.checkpoint_mgr.get_seen_ids("xhs:AI工具"), set())
+
+
 if __name__ == "__main__":
     unittest.main()

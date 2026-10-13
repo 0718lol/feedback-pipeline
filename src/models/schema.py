@@ -11,6 +11,12 @@ def current_iso_time() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Platforms this pipeline can actually collect from. There is deliberately no
+# "mock" entry: the project never persists fabricated records, so a platform that
+# cannot be reached produces a failed run rather than synthetic rows.
+SUPPORTED_PLATFORMS = ("discord", "xhs", "twitter")
+
+
 @dataclass
 class FeedbackItem:
     """
@@ -37,8 +43,10 @@ class FeedbackItem:
         errors: List[str] = []
         if not self.id or not isinstance(self.id, str):
             errors.append("Field 'id' is required and must be a non-empty string.")
-        if not self.platform or self.platform not in ("discord", "xhs", "twitter", "mock"):
-            errors.append(f"Field 'platform' must be one of ['discord', 'xhs', 'twitter', 'mock'], got: '{self.platform}'.")
+        if not self.platform or self.platform not in SUPPORTED_PLATFORMS:
+            errors.append(
+                f"Field 'platform' must be one of {list(SUPPORTED_PLATFORMS)}, got: '{self.platform}'."
+            )
         if not self.content or not isinstance(self.content, str) or not self.content.strip():
             errors.append("Field 'content' is required and cannot be empty whitespace.")
         if not self.author or not isinstance(self.author, str):
