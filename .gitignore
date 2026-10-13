@@ -7,6 +7,9 @@ __pycache__/
 env/
 venv/
 .venv/
+# Catches variant names such as .venv-verify or .venv312 used for throwaway
+# environments (e.g. fresh-clone verification runs).
+.venv*/
 ENV/
 
 # Secrets & Environment variables
