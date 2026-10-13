@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Secrets & Environment variables
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+
+# Data & Database
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.json
+!data/.gitkeep
+
+# Logs
+logs/
+*.log
+
+# Playwright & Browser Sessions
+data/xhs_auth_state.json
+.playwright/
+test-results/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE & OS
+.DS_Store
+.vscode/
+.idea/
