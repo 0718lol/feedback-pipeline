@@ -54,3 +54,4 @@ htmlcov/
 .DS_Store
 .vscode/
 .idea/
+reports/

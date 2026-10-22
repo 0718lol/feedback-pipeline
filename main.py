@@ -195,6 +195,22 @@ async def cmd_collect_async(args):
         pipeline.close()
 
 
+def cmd_report(output: str = None):
+    """Generate a self-contained HTML report from the current database."""
+    from src.reporting.report_generator import ReportGenerator
+
+    init_db()
+    conn = get_db_connection()
+    try:
+        generator = ReportGenerator(conn)
+        path = generator.save_html(output)
+        print(f"\n[report] HTML report written to: {path}")
+        print("         Open it in any browser -- no server or extra tools needed.\n")
+        return 0
+    finally:
+        conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Multi-Platform User Feedback Pipeline")
     subparsers = parser.add_subparsers(dest="subcommand", help="Sub-commands")
@@ -240,6 +256,14 @@ def main():
     trace_parser = subparsers.add_parser("trace", help="Trace an item and analysis back to source URL")
     trace_parser.add_argument("feedback_id", help="The feedback ID to audit")
 
+    # report
+    report_parser = subparsers.add_parser(
+        "report", help="Generate a self-contained HTML analysis report"
+    )
+    report_parser.add_argument(
+        "--output", default=None, help="Output HTML path (default: reports/feedback_report.html)"
+    )
+
     # test
     subparsers.add_parser("test", help="Run test suite")
 
@@ -257,6 +281,8 @@ def main():
         code = cmd_login()
     elif args.subcommand == "inspect":
         code = cmd_inspect(args.keyword)
+    elif args.subcommand == "report":
+        code = cmd_report(args.output)
     elif args.subcommand == "stats":
         code = cmd_stats()
     elif args.subcommand == "trace":
